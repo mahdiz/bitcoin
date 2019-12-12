@@ -22,6 +22,7 @@
 #include <sync.h>
 #include <tinyformat.h>
 #include <util/memory.h>
+#include <util/settings.h>
 #include <util/threadnames.h>
 #include <util/time.h>
 
@@ -71,6 +72,8 @@ fs::path GetDefaultDataDir();
 // The blocks directory is always net specific.
 const fs::path &GetBlocksDir();
 const fs::path &GetDataDir(bool fNetSpecific = true);
+// Return true if -datadir option points to a valid directory or is not specified.
+bool CheckDataDirOption();
 /** Tests only */
 void ClearDatadirCache();
 fs::path GetConfigFile(const std::string& confPath);
@@ -127,6 +130,23 @@ struct SectionInfo
 
 class ArgsManager
 {
+public:
+    enum Flags {
+        NONE = 0x00,
+        // Boolean options can accept negation syntax -noOPTION or -noOPTION=1
+        ALLOW_BOOL = 0x01,
+        ALLOW_INT = 0x02,
+        ALLOW_STRING = 0x04,
+        ALLOW_ANY = ALLOW_BOOL | ALLOW_INT | ALLOW_STRING,
+        DEBUG_ONLY = 0x100,
+        /* Some options would cause cross-contamination if values for
+         * mainnet were used while running on regtest/testnet (or vice-versa).
+         * Setting them as NETWORK_ONLY ensures that sharing a config file
+         * between mainnet and regtest/testnet won't cause problems due to these
+         * parameters by accident. */
+        NETWORK_ONLY = 0x200,
+    };
+
 protected:
     friend class ArgsManagerHelper;
 
@@ -134,14 +154,11 @@ protected:
     {
         std::string m_help_param;
         std::string m_help_text;
-        bool m_debug_only;
-
-        Arg(const std::string& help_param, const std::string& help_text, bool debug_only) : m_help_param(help_param), m_help_text(help_text), m_debug_only(debug_only) {};
+        unsigned int m_flags;
     };
 
     mutable CCriticalSection cs_args;
-    std::map<std::string, std::vector<std::string>> m_override_args GUARDED_BY(cs_args);
-    std::map<std::string, std::vector<std::string>> m_config_args GUARDED_BY(cs_args);
+    util::Settings m_settings GUARDED_BY(cs_args);
     std::string m_network GUARDED_BY(cs_args);
     std::set<std::string> m_network_only_args GUARDED_BY(cs_args);
     std::map<OptionsCategory, std::map<std::string, Arg>> m_available_args GUARDED_BY(cs_args);
@@ -248,7 +265,7 @@ public:
     void ForceSetArg(const std::string& strArg, const std::string& strValue);
 
     /**
-     * Looks for -regtest, -testnet and returns the appropriate BIP70 chain name.
+     * Returns the appropriate chain name from the program arguments.
      * @return CBaseChainParams::MAIN by default; raises runtime error if an invalid combination is given.
      */
     std::string GetChainName() const;
@@ -256,7 +273,7 @@ public:
     /**
      * Add argument
      */
-    void AddArg(const std::string& name, const std::string& help, const bool debug_only, const OptionsCategory& cat);
+    void AddArg(const std::string& name, const std::string& help, unsigned int flags, const OptionsCategory& cat);
 
     /**
      * Add many hidden arguments
@@ -269,6 +286,7 @@ public:
     void ClearArgs() {
         LOCK(cs_args);
         m_available_args.clear();
+        m_network_only_args.clear();
     }
 
     /**
@@ -277,9 +295,10 @@ public:
     std::string GetHelpMessage() const;
 
     /**
-     * Check whether we know of this arg
+     * Return Flags for known arg.
+     * Return ArgsManager::NONE for unknown arg.
      */
-    bool IsArgKnown(const std::string& key) const;
+    unsigned int FlagsOfKnownArg(const std::string& key) const;
 };
 
 extern ArgsManager gArgs;
@@ -348,10 +367,8 @@ std::string CopyrightHolders(const std::string& strPrefix);
  * On platforms that support it, tell the kernel the calling thread is
  * CPU-intensive and non-interactive. See SCHED_BATCH in sched(7) for details.
  *
- * @return The return value of sched_setschedule(), or 1 on systems without
- * sched_setschedule().
  */
-int ScheduleBatchPriority();
+void ScheduleBatchPriority();
 
 namespace util {
 
